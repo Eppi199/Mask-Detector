@@ -17,7 +17,7 @@ def detect_and_predict_mask(frame, faceNet, maskNet):
 	# grab the dimensions of the frame and then construct a blob
 	# from it
 	(h, w) = frame.shape[:2]
-	blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300),
+	blob = cv2.dnn.blobFromImage(frame, 1.0, (500, 500),
 		(104.0, 177.0, 123.0))
 
 	# pass the blob through the network and obtain the face detections
@@ -54,20 +54,21 @@ def detect_and_predict_mask(frame, faceNet, maskNet):
 			face = frame[startY:endY, startX:endX]
 			if(face.any()):
 				face = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-				face = cv2.resize(face, (224, 224))
+				face = cv2.resize(face, (360, 360))
 				face = img_to_array(face)
 				face = preprocess_input(face)
 
-			# add the face and bounding boxes to their respective
-			# lists
-			faces.append(face)
-			locs.append((startX, startY, endX, endY))
+				# add the face and bounding boxes to their respective
+				# lists
+				faces.append(face)
+				locs.append((startX, startY, endX, endY))
 
 	# only make a predictions if at least one face was detected
 	if len(faces) > 0:
 		# for faster inference we'll make batch predictions on *all*
 		# faces at the same time rather than one-by-one predictions
 		# in the above `for` loop
+		print(faces)
 		faces = np.array(faces, dtype="float32")
 		preds = maskNet.predict(faces, batch_size=32)
 
@@ -116,11 +117,12 @@ maskNet = load_model(args["model"])
 print("[INFO] starting video stream...")
 vs = VideoStream(src=0).start()
 time.sleep(5.0)
-iter = 0	#threshold for prediction
+iter = 0        #threshold for prediction
 color = (0, 0, 0)
 label = ''	#Mask/No Mask
-titleIter = 0	#threshold for the appearance of the title 'Наденьте маску!'
-flagTitleOff = 0	#counter for title 'Наденьте маску!', the higher the value, the longer the title lasts (now = 15)
+titleIter = 0   #threshold for the appearance of the title 'Наденьте маску!'
+flagTitleOff = 0        #counter for title 'Наденьте маску!', the higher the value, the longer the title lasts (now = 15)
+
 
 # loop over the frames from the video stream
 while True:
@@ -128,7 +130,7 @@ while True:
 	# to have a maximum width of 400 pixels
 	frame = vs.read()
 	frame = imutils.resize(frame, width=1500)
-	show_png(1340, 780, "/Users/kuklavodovich/Desktop/mask/Новая папка/Face-Mask-Detection/logo.png")
+	#show_png(1100, 670, "/Users/kuklavodovich/Desktop/mask/Новая папка/Face-Mask-Detection/logo.png")
 
 	# detect faces in the frame and determine if they are wearing a
 	# face mask or not
@@ -144,7 +146,7 @@ while True:
 
 	if flagTitleOff > 0:
 		flagTitleOff -= 1
-		show_png(200, 20, "/Users/kuklavodovich/Desktop/mask/Новая папка/Face-Mask-Detection/mask_please.png")
+		show_png(70, 20, "/Users/kuklavodovich/Desktop/mask/Новая папка/Face-Mask-Detection/mask_please.png")
 
 	# loop over the detected face locations and their corresponding
 	# locations
@@ -155,8 +157,8 @@ while True:
 
 		# determine the class label and color we'll use to draw
 		# the bounding box and text
-		if mask + 0.7 > withoutMask:
-			weightMask += mask + 0.7
+		if mask + 0.2 > withoutMask:
+			weightMask += mask + 0.2
 		else:
 			weightNoMask += withoutMask
 
@@ -164,7 +166,7 @@ while True:
 		# file = open('/Users/kuklavodovich/Desktop/xxx.txt', 'a')
 		# file.write(str(mask) + ", " + str(withoutMask) + "\n")
 		# file.close()
-		if(iter == 4):
+		if(iter == 3):
 			iter = 0
 			if(weightMask >= weightNoMask):
 				label = "Mask"
@@ -186,7 +188,7 @@ while True:
 
 		if  label == "No Mask" and titleIter > 2:
 			flagTitleOff = 15
-			show_png(200,20, "/Users/kuklavodovich/Desktop/mask/Новая папка/Face-Mask-Detection/mask_please.png")
+			# show_png(70,20, "/Users/kuklavodovich/Desktop/mask/Новая папка/Face-Mask-Detection/mask_please.png")
 
 	# show the output frame
 	cv2.imshow("Frame", frame)
