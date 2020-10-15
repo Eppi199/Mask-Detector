@@ -1,201 +1,148 @@
-# USAGE
-# python detect_mask_video.py
-
-# import the necessary packages
-from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
-from tensorflow.keras.preprocessing.image import img_to_array
-from tensorflow.keras.models import load_model
-from imutils.video import VideoStream
-import numpy as np
-import argparse
-import imutils
-import time
+# -*- coding:utf-8 -*-
 import cv2
-import os
+import time
+import argparse
 
-def detect_and_predict_mask(frame, faceNet, maskNet):
-	# grab the dimensions of the frame and then construct a blob
-	# from it
-	(h, w) = frame.shape[:2]
-	blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300),
-		(104.0, 177.0, 123.0))
+import numpy as np
+from PIL import Image
+#from keras.models import model_from_json
+from utils.anchor_generator import generate_anchors
+from utils.anchor_decode import decode_bbox
+from utils.nms import single_class_non_max_suppression
+from load_model.tensorflow_loader import load_tf_model, tf_inference
 
-	# pass the blob through the network and obtain the face detections
-	faceNet.setInput(blob)
-	detections = faceNet.forward()
+sess, graph = load_tf_model('models/face_mask_detection.pb')
+# anchor configuration
+feature_map_sizes = [[33, 33], [17, 17], [9, 9], [5, 5], [3, 3]]
+anchor_sizes = [[0.04, 0.056], [0.08, 0.11], [0.16, 0.22], [0.32, 0.45], [0.64, 0.72]]
+anchor_ratios = [[1, 0.62, 0.42]] * 5
 
-	# initialize our list of faces, their corresponding locations,
-	# and the list of predictions from our face mask network
-	faces = []
-	locs = []
-	preds = []
+# generate anchors
+anchors = generate_anchors(feature_map_sizes, anchor_sizes, anchor_ratios)
 
-	# loop over the detections
-	for i in range(0, detections.shape[2]):
-		# extract the confidence (i.e., probability) associated with
-		# the detection
-		confidence = detections[0, 0, i, 2]
+# for inference , the batch size is 1, the model output shape is [1, N, 4],
+# so we expand dim for anchors to [1, anchor_num, 4]
+anchors_exp = np.expand_dims(anchors, axis=0)
 
-		# filter out weak detections by ensuring the confidence is
-		# greater than the minimum confidence
-		if confidence > args["confidence"]:
-			# compute the (x, y)-coordinates of the bounding box for
-			# the object
-			box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-			(startX, startY, endX, endY) = box.astype("int")
-
-			# ensure the bounding boxes fall within the dimensions of
-			# the frame
-			(startX, startY) = (max(0, startX), max(0, startY))
-			(endX, endY) = (min(w - 1, endX), min(h - 1, endY))
-
-			# extract the face ROI, convert it from BGR to RGB channel
-			# ordering, resize it to 224x224, and preprocess it
-			face = frame[startY:endY, startX:endX]
-			if(face.any()):
-				face = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-				face = cv2.resize(face, (224, 224))
-				face = img_to_array(face)
-				face = preprocess_input(face)
-
-			# add the face and bounding boxes to their respective
-			# lists
-			faces.append(face)
-			locs.append((startX, startY, endX, endY))
-
-	# only make a predictions if at least one face was detected
-	if len(faces) > 0:
-		# for faster inference we'll make batch predictions on *all*
-		# faces at the same time rather than one-by-one predictions
-		# in the above `for` loop
-		faces = np.array(faces, dtype="float32")
-		preds = maskNet.predict(faces, batch_size=32)
-
-	# return a 2-tuple of the face locations and their corresponding
-	# locations
-	return (locs, preds)
-
-def show_png(x, y, path):
-	img = cv2.imread(path, -1)
-	img_height, img_width, _ = img.shape
-	y1, y2 = y, y + img.shape[0]
-	x1, x2 = x, x + img.shape[1]
-	alpha_s = img[:, :, 3] / 255.0
-	alpha_l = 1.0 - alpha_s
-
-	for c in range(0, 3):
-		frame[y1:y2, x1:x2, c] = (alpha_s * img[:, :, c] +
-								  alpha_l * frame[y1:y2, x1:x2, c])
-	# frame[y:y + img, x:x + img_width] = limg
+id2class = {0: 'Mask', 1: 'NoMask'}
 
 
-# construct the argument parser and parse the arguments
-ap = argparse.ArgumentParser()
-ap.add_argument("-f", "--face", type=str,
-	default="face_detector",
-	help="path to face detector model directory")
-ap.add_argument("-m", "--model", type=str,
-	default="mask_detector.model",
-	help="path to trained face mask detector model")
-ap.add_argument("-c", "--confidence", type=float, default=0.5,
-	help="minimum probability to filter weak detections")
-args = vars(ap.parse_args())
+def inference(image,
+              conf_thresh=0.5,
+              iou_thresh=0.4,
+              target_shape=(160, 160),
+              draw_result=True,
+              show_result=True
+              ):
+    '''
+    Main function of detection inference
+    :param image: 3D numpy array of image
+    :param conf_thresh: the min threshold of classification probabity.
+    :param iou_thresh: the IOU threshold of NMS
+    :param target_shape: the model input size.
+    :param draw_result: whether to daw bounding box to the image.
+    :param show_result: whether to display the image.
+    :return:
+    '''
+    # image = np.copy(image)
+    output_info = []
+    height, width, _ = image.shape
+    image_resized = cv2.resize(image, target_shape)
+    image_np = image_resized / 255.0  # 归一化到0~1
+    image_exp = np.expand_dims(image_np, axis=0)
+    y_bboxes_output, y_cls_output = tf_inference(sess, graph, image_exp)
 
-# load our serialized face detector model from disk
-print("[INFO] loading face detector model...")
-prototxtPath = os.path.sep.join([args["face"], "deploy.prototxt"])
-weightsPath = os.path.sep.join([args["face"],
-	"res10_300x300_ssd_iter_140000.caffemodel"])
-faceNet = cv2.dnn.readNet(prototxtPath, weightsPath)
+    # remove the batch dimension, for batch is always 1 for inference.
+    y_bboxes = decode_bbox(anchors_exp, y_bboxes_output)[0]
+    y_cls = y_cls_output[0]
+    # To speed up, do single class NMS, not multiple classes NMS.
+    bbox_max_scores = np.max(y_cls, axis=1)
+    bbox_max_score_classes = np.argmax(y_cls, axis=1)
 
-# load the face mask detector model from disk
-print("[INFO] loading face mask detector model...")
-maskNet = load_model(args["model"])
+    # keep_idx is the alive bounding box after nms.
+    keep_idxs = single_class_non_max_suppression(y_bboxes,
+                                                 bbox_max_scores,
+                                                 conf_thresh=conf_thresh,
+                                                 iou_thresh=iou_thresh,
+                                                 )
 
-# initialize the video stream and allow the camera sensor to warm up
-print("[INFO] starting video stream...")
-vs = VideoStream(src=0).start()
-time.sleep(5.0)
-iter = 0	#threshold for prediction
-color = (0, 0, 0)
-label = ''	#Mask/No Mask
-titleIter = 0	#threshold for the appearance of the title 'Наденьте маску!'
-flagTitleOff = 0	#counter for title 'Наденьте маску!', the higher the value, the longer the title lasts (now = 15)
+    for idx in keep_idxs:
+        conf = float(bbox_max_scores[idx])
+        class_id = bbox_max_score_classes[idx]
+        bbox = y_bboxes[idx]
+        # clip the coordinate, avoid the value exceed the image boundary.
+        xmin = max(0, int(bbox[0] * width))
+        ymin = max(0, int(bbox[1] * height))
+        xmax = min(int(bbox[2] * width), width)
+        ymax = min(int(bbox[3] * height), height)
 
-# loop over the frames from the video stream
-while True:
-	# grab the frame from the threaded video stream and resize it
-	# to have a maximum width of 400 pixels
-	frame = vs.read()
-	frame = imutils.resize(frame, width=1500)
-	show_png(1340, 780, "/Users/kuklavodovich/Desktop/mask/Новая папка/Face-Mask-Detection/logo.png")
+        if draw_result:
+            if class_id == 0:
+                color = (0, 255, 0)
+            else:
+                color = (255, 0, 0)
+            cv2.rectangle(image, (xmin, ymin), (xmax, ymax), color, 2)
+            cv2.putText(image, "%s: %.2f" % (id2class[class_id], conf), (xmin + 2, ymin - 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, color)
+        output_info.append([class_id, conf, xmin, ymin, xmax, ymax])
 
-	# detect faces in the frame and determine if they are wearing a
-	# face mask or not
-	(locs, preds) = detect_and_predict_mask(frame, faceNet, maskNet)
-
-	weightMask = 0
-	weightNoMask = 0
-
-	if not locs and not preds:
-		color = (0, 0, 0)
-		label = ''
-		iter = titleIter = 0
-
-	if flagTitleOff > 0:
-		flagTitleOff -= 1
-		show_png(200, 20, "/Users/kuklavodovich/Desktop/mask/Новая папка/Face-Mask-Detection/mask_please.png")
-
-	# loop over the detected face locations and their corresponding
-	# locations
-	for (box, pred) in zip(locs, preds):
-		# unpack the bounding box and predictions
-		(startX, startY, endX, endY) = box
-		(mask, withoutMask) = pred
-
-		# determine the class label and color we'll use to draw
-		# the bounding box and text
-		if mask + 0.7 > withoutMask:
-			weightMask += mask + 0.7
-		else:
-			weightNoMask += withoutMask
+    if show_result:
+        Image.fromarray(image).show()
+    return output_info
 
 
-		# file = open('/Users/kuklavodovich/Desktop/xxx.txt', 'a')
-		# file.write(str(mask) + ", " + str(withoutMask) + "\n")
-		# file.close()
-		if(iter == 4):
-			iter = 0
-			if(weightMask >= weightNoMask):
-				label = "Mask"
-				color = (0, 255, 0)
-				titleIter = flagTitleOff = 0
-			else:
-				label = "No Mask"
-				color = (0, 0, 255)
-				titleIter += 1
-			weightNoMask = weightMask = 0
+def run_on_video(video_path, output_video_name, conf_thresh):
+    cap = cv2.VideoCapture(video_path)
+    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    # writer = cv2.VideoWriter(output_video_name, fourcc, int(fps), (int(width), int(height)))
+    total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    if not cap.isOpened():
+        raise ValueError("Video open failed.")
+        return
+    status = True
+    idx = 0
+    while status:
+        start_stamp = time.time()
+        status, img_raw = cap.read()
+        img_raw = cv2.cvtColor(img_raw, cv2.COLOR_BGR2RGB)
+        read_frame_stamp = time.time()
+        if (status):
+            inference(img_raw,
+                      conf_thresh,
+                      iou_thresh=0.5,
+                      target_shape=(260, 260),
+                      draw_result=True,
+                      show_result=False)
+            cv2.imshow('image', img_raw[:, :, ::-1])
+            cv2.waitKey(1)
+            inference_stamp = time.time()
+            # writer.write(img_raw)
+            write_frame_stamp = time.time()
+            idx += 1
+            print("%d of %d" % (idx, total_frames))
+            print("read_frame:%f, infer time:%f, write time:%f" % (read_frame_stamp - start_stamp,
+                                                                   inference_stamp - read_frame_stamp,
+                                                                   write_frame_stamp - inference_stamp))
+    # writer.release()
 
-		iter += 1
 
-		# display the label and bounding box rectangle on the output
-		# frame
-		cv2.putText(frame, label, (startX, startY - 10),
-			cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
-		cv2.rectangle(frame, (startX, startY), (endX, endY), color, 2)
-
-		if  label == "No Mask" and titleIter > 2:
-			flagTitleOff = 15
-			show_png(200,20, "/Users/kuklavodovich/Desktop/mask/Новая папка/Face-Mask-Detection/mask_please.png")
-
-	# show the output frame
-	cv2.imshow("Frame", frame)
-	key = cv2.waitKey(1) & 0xFF
-
-	# if the `q` key was pressed, break from the loop
-	if key == ord("q"):
-		break
-
-# do a bit of cleanup
-cv2.destroyAllWindows()
-vs.stop()
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Face Mask Detection")
+    parser.add_argument('--img-mode', type=int, default=1, help='set 1 to run on image, 0 to run on video.')
+    parser.add_argument('--img-path', type=str, help='path to your image.')
+    parser.add_argument('--video-path', type=str, default='0', help='path to your video, `0` means to use camera.')
+    # parser.add_argument('--hdf5', type=str, help='keras hdf5 file')
+    args = parser.parse_args()
+    if args.img_mode:
+        imgPath = args.img_path
+        img = cv2.imread(imgPath)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        inference(img, show_result=True, target_shape=(260, 260))
+    else:
+        video_path = args.video_path
+        if args.video_path == '0':
+            video_path = 0
+        run_on_video(video_path, '', conf_thresh=0.5)
